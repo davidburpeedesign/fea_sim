@@ -442,7 +442,7 @@ geometry, the study or the maximum re-solves.
   shows `solving...` and stays responsive.
 
 **Size:** the reference shoe after cleaning is 18,831 nodes, 30,683
-struts, ~113k DOF. A sparse direct solve took ~2 s per pass in the Python
+struts, ~113k DOF. A sparse direct solve took ~4 s per pass in the Python
 prototype. A full run is 10 steps × ~10–15 contact passes, so per-pass
 speed matters. Warm-started PCG on a fixed K should get each pass well
 under a second, but that is the first thing to benchmark in phase 2. If
@@ -469,16 +469,23 @@ linear solve. The settings were d = 1.5 mm, EPU 46 (E = 15 MPa,
 ν = 0.49), whole lattice, 75 kg body. The numbers are indicative, not
 validated, but they set the defaults and the order of work.
 
-Model: 9,104 nodes, 20,956 struts, 54,624 DOF; assembly ~2 s, ~2 s per
-direct solve.
+Model: 18,831 nodes, 30,683 struts, 112,986 DOF (the phase 1 cleaning,
+bowed skin edges kept to 0.05 mm); assembly ~2.4 s, ~4 s per direct
+solve.
 
 | load | force | travel past first contact | contact nodes (compressor / ground) | fibre strain p95 / p99 / max | struts over 20 % |
 |---|---|---|---|---|---|
-| 0.5 BW | 368 N | 0.63 mm | 516 / 365 | 2.7 / 4.9 / 9.7 % | 0 |
-| 1.0 BW | 736 N | 0.97 mm | 601 / 451 | 5.3 / 7.9 / 15.4 % | 0 |
-| 1.5 BW | 1,104 N | 1.25 mm | 658 / 516 | 7.6 / 10.6 / 20.3 % | 2 |
-| 2.0 BW | 1,472 N | 1.50 mm | 707 / 558 | 9.6 / 13.0 / 24.7 % | 10 |
-| 2.5 BW | 1,839 N | 1.74 mm | 743 / 598 | 11.6 / 15.3 / 28.8 % | 32 (0.15 %) |
+| 0.5 BW | 368 N | 0.64 mm | 643 / 535 | 1.3 / 4.6 / 9.6 % | 0 |
+| 1.0 BW | 736 N | 0.98 mm | 764 / 653 | 3.3 / 7.6 / 15.4 % | 0 |
+| 1.5 BW | 1,104 N | 1.26 mm | 841 / 751 | 5.5 / 10.2 / 20.3 % | 2 |
+| 2.0 BW | 1,472 N | 1.52 mm | 911 / 812 | 7.6 / 12.6 / 24.7 % | 12 |
+| 2.5 BW | 1,839 N | 1.75 mm | 953 / 861 | 9.4 / 14.8 / 28.7 % | 36 (0.12 %) |
+
+An earlier run that wrongly made every skin edge straight (20,956
+struts on 9,104 nodes) gave nearly the same curve: 0.97 mm at 1 BW,
+32 struts over 20 % at 2.5 BW. Under this load the force goes mainly
+through the straight midsole struts, so the bowed skins barely change
+it. They'll matter more for loads that stretch the skins.
 
 Stiffness rises from ~700 N/mm just after first contact to ~1,600 N/mm
 at 2.5 BW, as contact spreads across the footbed and the rocker outsole
@@ -498,7 +505,7 @@ What this changed:
 3. **Linear holds over the whole slider range, with a few exceptions to
    watch.** With EPU 46 even 2.5 BW keeps 99 % of struts under 15 %
    strain. The 20 % flag catches a handful of hot struts (2 at 1.5 BW,
-   32 at 2.5 BW), and those, not the lattice as a whole, are where the
+   36 at 2.5 BW), and those, not the lattice as a whole, are where the
    linear answer is in doubt. (An earlier run with a softer 7.85 MPa
    estimate put 634 struts over 20 % at ~2.3 BW. The real modulus
    matters.)
@@ -660,7 +667,7 @@ Each phase ends with something that runs and a test that proves it.
 | **1. import + clean** | `io/obj.ts`, `lattice/clean.ts`, `contact/surface.ts` | Vitest on small fixtures (two cells sharing an edge, a subdivided strut, a floating strut). On the reference shoe: 30,683 struts / 18,831 nodes, 1 piece, 53,593 duplicates removed, 2 welds, first contact at 1.98 mm, nothing interpenetrating. **Done** (a basic line view of the model ships with it, ahead of phase 3) |
 | **2. element + solver core** | `element.ts` (Timoshenko frame), `assemble.ts`, `pcg.ts`, `cholesky.ts`, `recover.ts`; no UI | Vitest: cantilever tip δ = PL³/3EI + PL/κGA, axial bar PL/EA, torsion TL/GJ, fixed-fixed beam, a portal frame, all within 0.1 %; a subdivided strut matches the single-element strut; PCG matches Cholesky; reactions balance loads. Benchmark: one warm-started PCG solve of the reference shoe (113k DOF) in the browser, target < 1 s |
 | **3. stage** | OBJ geometry on the stage, instanced struts, group colours, compressor, section plane, view cube port | the reference shoe renders at 60 fps with all 21k struts |
-| **4. contact + worker** | compressor and ground contact (stick), active set with the §6.4 safeguards, force-target stepping, worker solve; deformed shape and fields | Vitest: a flat plate on a grid of vertical columns gives F = n·EA/L · (δ − g) after closing a known gap; tensile contacts release. Reference shoe, 0.5–2.5 BW sweep: converges without hitting the pass cap, and lands within ~10 % of the prototype (§6.7: 0.97 mm past first contact at 1 BW, 32 struts over 20 % at 2.5 BW), without blocking the UI |
+| **4. contact + worker** | compressor and ground contact (stick), active set with the §6.4 safeguards, force-target stepping, worker solve; deformed shape and fields | Vitest: a flat plate on a grid of vertical columns gives F = n·EA/L · (δ − g) after closing a known gap; tensile contacts release. Reference shoe, 0.5–2.5 BW sweep: converges without hitting the pass cap, and lands within ~10 % of the prototype (§6.7: 0.98 mm past first contact at 1 BW, 36 struts over 20 % at 2.5 BW), without blocking the UI |
 | **5. results + exports** | results / charts / model tabs, contact pressure map, per-region and per-group tables, exports | reaction balance < 0.1 % of applied force; `_deformed.obj` re-imports with the same topology |
 
 Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
