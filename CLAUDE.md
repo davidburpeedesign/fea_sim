@@ -11,16 +11,33 @@ lattice with one-sided contact, solves a 3D frame model in a Web Worker,
 and visualises deformation and stress. It never generates or edits
 lattices.
 `ARCHITECTURE.md` is the design doc and results reference; read it before
-changing solver code. The repo is at the scoping stage. Build in the order
-of ARCHITECTURE.md §10.
+changing solver code. Build in the order
+of ARCHITECTURE.md §11 (phases 0–1 are done).
 
-## Commands (once scaffolded)
+## Commands
 
 - `npm run dev`: dev server on :5173
-- `npm test`: Vitest (elements and solver vs. closed-form results)
+- `npm test`: Vitest (import/cleaning fixtures; the reference shoe in
+  `tests/fixtures/local/`, gitignored, when present; solver vs.
+  closed-form results from phase 2)
 - `npm run typecheck` / `npm run build`
 
 Run `npm test` and `npm run typecheck` before every commit.
+
+## Layout
+
+```
+src/core/       types, colormap (ported from human_data_capture)
+src/io/         obj.ts (parser), index.ts (router, mm → m)
+src/lattice/    clean.ts (weld, dedupe, Douglas–Peucker, connectivity)
+src/contact/    surface.ts (compressor, xz grid, vertical gaps)
+src/materials/  library.ts (EPU 46 family, from Carbon's datasheet)
+src/study/      study.ts (diameters, material, body-weight load)
+src/scene/      Viewport.tsx (three.js)
+src/ui/         Toolbar, Sidebar, ModelPanel
+src/styles/     tokens.css (verbatim from human_data_capture) + app.css
+tests/          vitest
+```
 
 ## Rules
 
@@ -31,7 +48,7 @@ Run `npm test` and `npm run typecheck` before every commit.
   an `Indenter` only; diameters, material, ground and load live in a
   `Study`.
 - **Cleaning is reported, never silent.** Welds, deduplicated segments,
-  collapsed chains and dropped pieces all go in the `CleanReport`.
+  simplified chains and dropped pieces all go in the `CleanReport`.
 - **The solver never touches the DOM.** `src/fea/` is pure TS and runs in
   the worker; the UI talks to it only through `fea/worker.ts`.
 - **Be honest about results.** Report solver residual and reaction

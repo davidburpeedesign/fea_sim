@@ -21,8 +21,8 @@ lattices: all geometry comes from Houdini (or similar) as files.
 **In (v0):**
 
 - import a **lattice** as a polyline network (OBJ `l` elements) and turn
-  it into a beam (frame) model: weld, dedupe, collapse straight
-  subdivided struts, drop floating pieces, and report what changed
+  it into a beam (frame) model: weld, dedupe, simplify subdivided
+  struts, drop floating pieces, and report what changed
 - import a **compressor** as a triangulated surface (OBJ `f` elements)
   and treat it as a rigid body that moves straight down into the lattice
 - a rigid **ground** plane under the lattice as the support
@@ -85,13 +85,22 @@ What the importer has to deal with:
    both loops: 53,569 segments occur twice and 8 four times. Imported
    as-is, the skins would be twice as stiff as they should be.
    Segments are deduplicated by their endpoint pair.
-2. **Struts are straight but subdivided.** Every strut is a straight
-   line resampled into ~5 segments of ~0.9 mm (arc length / chord = 1.00
-   for all groups). Collapsing chains of degree-2 points between
-   junctions gives **20,956 struts on 9,104 nodes**: ~55k degrees of
-   freedom instead of ~570k. For a linear frame this loses nothing. A
-   straight beam with no load between its ends is exact as one element.
-   The nonlinear phases (§12) re-subdivide on demand.
+2. **Struts are subdivided, and the skin edges bow.** Every strut is
+   resampled into ~5 segments of ~0.9 mm. Midsole (`cross`) and connector
+   struts are straight. Skin edges follow the curved shell: their bow
+   off the straight line between junctions is 0.05 mm at the median,
+   ~0.2 mm at p90 and up to 1 mm. (Scoping first called every strut
+   straight from the median arc/chord ratio; the phase 1 tests caught
+   it.) A bow matters: on a 1.5 mm strut, 0.2 mm of bow makes it
+   noticeably softer in tension and compression than a straight one.
+   So each chain between junctions is simplified with Douglas–Peucker
+   (Douglas & Peucker 1973) to the fewest points that stay within
+   **0.05 mm** of the file's curve (1/30 of the strut diameter).
+   Straight struts become one element each, which is exact (a straight
+   beam with no load between its ends); 6,645 bowed chains keep a few
+   points. Result: **30,683 struts on 18,831 nodes, ~113k degrees of
+   freedom** instead of ~570k for every file point. The nonlinear
+   phases (§12) re-subdivide on demand.
 3. **One floating strut.** A 12 mm vertical `cross` strut at
    (−27, −63) has endpoints 0.01 mm from lattice nodes but not welded to
    them. It's a separate piece with nothing holding it, so the stiffness
@@ -108,10 +117,10 @@ What the importer has to deal with:
 | content | 909 vertices, 1,685 triangles, open single-sided surface (131 boundary edges), area ≈ 19,500 mm² |
 | shape | a footbed: the plantar surface the foot would press on, spanning heel to toe |
 | orientation | normals point down (−Y), towards the lattice |
-| position | **2.0 mm above the footbed skin** everywhere it overlaps (gap 1.99–2.03 mm at the median, up to 2.7 mm at the edges, over 1,242 footbed nodes). It is the footbed offset upward, so contact closes almost uniformly after 2 mm of travel |
+| position | **2.0 mm above the footbed skin** everywhere it overlaps. First contact after 1.98 mm of travel; 2,106 footbed nodes are within 1 mm of that and all close by 3.0 mm. It is the footbed offset upward, so contact closes almost uniformly after 2 mm of travel |
 
-Below the compressor footprint: 1,242 footbed (`baseForm inner`) nodes
-within 2–2.7 mm, then the `cross` midsole, then the outsole
+Below the compressor footprint: the footbed (`baseForm inner`) nodes
+within 2–3 mm, then the `cross` midsole, then the outsole
 (`baseForm`) 8–14 mm further down. 345 outsole nodes lie within 0.5 mm of
 the lowest point (y = −13.0 mm); the rest of the outsole curves up at
 heel and toe.
@@ -122,8 +131,8 @@ heel and toe.
   `v` lines may carry colours, `vn` / `vt` are ignored
 - consistent units between the two files (millimetres)
 - the same up axis in both files; Y up by default, switchable
-- struts may be straight-subdivided (collapsed) or genuinely curved
-  (kept as chains of straight elements; detected by arc / chord > 1.001)
+- struts may be subdivided straight lines or curves; both are simplified
+  to within the curve tolerance (0.05 mm by default)
 - groups name the parts that get different diameters
 
 ---
@@ -156,7 +165,7 @@ groups the cleaning step needs.
 ```
  lattice.obj ──► io/obj.ts ──► lattice/clean.ts ──────────────► Lattice
  (polylines)      points,       weld 0.05 mm → dedupe segments     nodes, struts,
-                  polylines,    → collapse straight chains          group per strut,
+                  polylines,    → simplify chains (0.05 mm)         group per strut,
                   groups        → drop floating pieces              clean report
                                 → report
 
@@ -197,8 +206,8 @@ re-solves without re-importing.
 - **`Lattice`**: `nodes: Float64Array` (xyz, flat), `struts: Uint32Array`
   (node pairs, flat), `strutGroup: Uint8Array` into `groups: string[]`,
   bounding box, and the `CleanReport` (welded points, duplicate segments
-  removed, chains collapsed, floating pieces dropped, curved struts
-  kept). Source file name and hash.
+  removed, points simplified away, bowed chains, floating pieces
+  dropped). Source file name and hash.
 - **`Indenter`**: triangle soup (`Float64Array` + `Uint32Array`), a
   uniform xz grid over its triangles for fast vertical ray casts, and per
   lattice node the initial gap along −Y (`Infinity` outside the
@@ -432,14 +441,15 @@ geometry, the study or the maximum re-solves.
 - Runs in a **Web Worker**; buffers are transferred, not copied. The UI
   shows `solving...` and stays responsive.
 
-**Size:** the reference shoe after cleaning is 9,104 nodes, 20,956
-struts, ~55k DOF. A sparse direct solve took ~2 s per pass in the Python
+**Size:** the reference shoe after cleaning is 18,831 nodes, 30,683
+struts, ~113k DOF. A sparse direct solve took ~2 s per pass in the Python
 prototype. A full run is 10 steps × ~10–15 contact passes, so per-pass
 speed matters. Warm-started PCG on a fixed K should get each pass well
 under a second, but that is the first thing to benchmark in phase 2. If
 it isn't, the fallback is a sparse Cholesky of K, factored once per
 import and updated per contact pass. Skipping the chain collapse would
-make it ~570k DOF, which is the main reason the collapse is in v0.
+make it ~570k DOF, which is the main reason the simplification is in
+v0.
 
 ### 6.6 Checks before solving
 
@@ -541,7 +551,7 @@ with a corner-tick frame, right tabbed panel, and a strip under the stage.
 - **Sidebar blocks** (`.block` / `.block__head`, as in
   `human_data_capture`):
   - *geometry*: lattice and compressor files, with the clean report
-    (`welded 2 · deduped 53,593 · 20,956 struts / 9,104 nodes · dropped 0`)
+    (`welded 2 · deduped 53,593 · 30,683 struts / 18,831 nodes · dropped 0`)
   - *groups*: one row per group with diameter (mm), include toggle and
     count. The group names come from the file; the unnamed group shows
     as `(no group)`
@@ -622,19 +632,20 @@ layout, `.btn`, `.block`, `.tabs`, `.mtable`, `.tick` and the view cube.
 src/core/       types, units, vec/mat3, colormap (from human_data_capture)
 src/io/         obj.ts (points, polylines, triangles, groups), export.ts,
                 index.ts router
-src/lattice/    clean.ts (weld, dedupe, collapse, connectivity, report)
+src/lattice/    clean.ts (weld, dedupe, simplify, connectivity, report)
 src/contact/    surface.ts (xz grid, ray cast, gaps, tributary areas)
 src/fea/        element.ts, dof.ts, assemble.ts (CSR), pcg.ts, cholesky.ts,
                 contact.ts (active set, stepping), recover.ts, solve.ts,
                 worker.ts
-src/study/      ground.ts, presets (body weight), defaults
+src/study/      study.ts (Study, defaults, body-weight slider), ground.ts
 src/materials/  library.ts
 src/scene/      Viewport.tsx (instanced struts, compressor, section plane),
                 ViewCube.tsx (port)
 src/ui/         Toolbar, Sidebar, ResultsPanel, ChartsPanel, ModelPanel,
                 FieldStrip, charts/
 src/styles/     tokens.css (verbatim copy) + app.css
-tests/          vitest; fixtures/ with small hand-made OBJs
+tests/          vitest; small OBJs built in-test. tests/fixtures/local/
+                (gitignored) holds the reference shoe for reference.test.ts
 ```
 
 ---
@@ -645,9 +656,9 @@ Each phase ends with something that runs and a test that proves it.
 
 | phase | work | exit test |
 |---|---|---|
-| **0. scaffold** | Vite + React + TS + three.js; tokens.css, app.css shell, toolbar, empty sidebar/stage/panel; deploy workflow | builds and deploys to Pages with the MORPHXGEN shell |
-| **1. import + clean** | `io/obj.ts`, `lattice/clean.ts`, `contact/surface.ts` | Vitest on small fixtures (two cells sharing an edge, a subdivided strut, a floating strut). On the reference shoe: 20,956 struts / 9,104 nodes, 1 component, footbed gaps 1.99–2.74 mm |
-| **2. element + solver core** | `element.ts` (Timoshenko frame), `assemble.ts`, `pcg.ts`, `cholesky.ts`, `recover.ts`; no UI | Vitest: cantilever tip δ = PL³/3EI + PL/κGA, axial bar PL/EA, torsion TL/GJ, fixed-fixed beam, a portal frame, all within 0.1 %; a subdivided strut matches the single-element strut; PCG matches Cholesky; reactions balance loads. Benchmark: one warm-started PCG solve of the reference shoe (55k DOF) in the browser, target < 0.5 s |
+| **0. scaffold** | Vite + React + TS + three.js; tokens.css, app.css shell, toolbar, empty sidebar/stage/panel; deploy workflow | builds and deploys to Pages with the MORPHXGEN shell. **Done** (deploys once merged to `main`) |
+| **1. import + clean** | `io/obj.ts`, `lattice/clean.ts`, `contact/surface.ts` | Vitest on small fixtures (two cells sharing an edge, a subdivided strut, a floating strut). On the reference shoe: 30,683 struts / 18,831 nodes, 1 piece, 53,593 duplicates removed, 2 welds, first contact at 1.98 mm, nothing interpenetrating. **Done** (a basic line view of the model ships with it, ahead of phase 3) |
+| **2. element + solver core** | `element.ts` (Timoshenko frame), `assemble.ts`, `pcg.ts`, `cholesky.ts`, `recover.ts`; no UI | Vitest: cantilever tip δ = PL³/3EI + PL/κGA, axial bar PL/EA, torsion TL/GJ, fixed-fixed beam, a portal frame, all within 0.1 %; a subdivided strut matches the single-element strut; PCG matches Cholesky; reactions balance loads. Benchmark: one warm-started PCG solve of the reference shoe (113k DOF) in the browser, target < 1 s |
 | **3. stage** | OBJ geometry on the stage, instanced struts, group colours, compressor, section plane, view cube port | the reference shoe renders at 60 fps with all 21k struts |
 | **4. contact + worker** | compressor and ground contact (stick), active set with the §6.4 safeguards, force-target stepping, worker solve; deformed shape and fields | Vitest: a flat plate on a grid of vertical columns gives F = n·EA/L · (δ − g) after closing a known gap; tensile contacts release. Reference shoe, 0.5–2.5 BW sweep: converges without hitting the pass cap, and lands within ~10 % of the prototype (§6.7: 0.97 mm past first contact at 1 BW, 32 struts over 20 % at 2.5 BW), without blocking the UI |
 | **5. results + exports** | results / charts / model tabs, contact pressure map, per-region and per-group tables, exports | reaction balance < 0.1 % of applied force; `_deformed.obj` re-imports with the same topology |
