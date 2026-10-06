@@ -178,8 +178,9 @@ groups the cleaning step needs.
 | setting | value |
 |---|---|
 | strut diameter | 1.5 mm, every group |
-| material | elastomeric SLA resin: Shore 77A, tensile strength 20 MPa, elongation at break 250 %. E ≈ 7.9 MPa estimated from hardness (§6.2) |
-| load | a **force** target; the compressor travels down until it carries it |
+| material | **Carbon EPU 46** (elastomeric polyurethane, Carbon DLS): E 15 MPa, tensile strength 26 MPa, elongation at break 330 %, Shore 78A (§6.2) |
+| load | a **force** target set on a slider from **0.5 to 2.5 × body weight**; the compressor travels down until it carries it |
+| linear limit | **20 %** peak fibre strain |
 | start | as modelled, 2 mm clear of the footbed. Stepping starts at first contact, so the gap costs nothing and nothing has to be moved |
 | extent | the **whole lattice**: upper, skins, connectors and midsole |
 | friction | **stick** on both the compressor and the ground |
@@ -204,14 +205,14 @@ re-solves without re-importing.
 - **`Study`**:
   - `sections: Record<group, { d: number }>` (circular, mm in the UI;
     default 1.5)
-  - `material`: `{ name, shoreA, E, nu, tensileStrength,
-    elongationAtBreak, strainLimit, elastomer: true }`; `E` either typed
-    in from a datasheet or estimated from `shoreA` (and marked so)
+  - `material`: `{ name, E, nu, tensileStrength, elongationAtBreak,
+    shoreA, strainLimit, source }`; `source` is `datasheet` or
+    `estimated` (E from Shore hardness, for resins without a modulus)
   - `ground`: `{ y: 'auto' | number, friction: 'stick' | 'slip' }`
   - `indenter`: `{ friction: 'stick' | 'slip' }`
-  - `load`: `{ target: 'force', N }` (the default) or
-    `{ target: 'displacement', mm }` (kept for debugging and tests),
-    plus `steps`
+  - `load`: `{ target: 'force', bw, bodyMass }` (the default: N =
+    bw × bodyMass × g, bw ∈ [0.5, 2.5]) or `{ target: 'displacement',
+    mm }` (kept for debugging and tests), plus `steps`
   - `include: Record<group, boolean>`, all on by default
 - **`Result`**: per load step: compressor travel, total force, active
   contact nodes. For the final step: `u: Float64Array` (6 DOF/node), strut
@@ -253,30 +254,51 @@ Joints are rigid: a junction carries moment between all its struts.
 
 ### 6.2 Material (`materials/library.ts`)
 
-The lattice is printed in an elastomeric SLA resin: **Shore 77A**,
-tensile strength 20 MPa, elongation at break 250 %. A datasheet like this
-gives no modulus, and the model needs one.
+The lattice is printed in **Carbon EPU 46**, an elastomeric polyurethane
+made by Carbon's light-based DLS process. From its technical data sheet:
 
-- **E ≈ 7.9 MPa**, estimated from hardness with Gent's relation
-  (Gent 1958: E = 0.0981 (56 + 7.62336 S) / (0.137505 (254 − 2.54 S))
-  MPa, S = Shore A). It is the small-strain modulus, which is what a
-  linear model uses. Hardness-to-modulus estimates are good to about
-  ±30 %, so the UI marks E as `estimated` until a measured tensile
-  modulus is typed in. Stiffness scales directly with E; strains and the
-  deformed shape at a given force don't depend on it at all in a linear
-  model.
+| property | ASTM | value |
+|---|---|---|
+| tensile strength | D412 | 26 MPa |
+| modulus of elasticity (Young's) | D412 | 15 MPa |
+| elongation at break | D412 | 330 % |
+| hardness | D2240 | Shore 78A |
+| Bayshore resilience | D2632 | 36 % |
+| tear strength | D642 | 44 kN/m |
+| glass transition | D4065 | −6 °C |
+
+How the model uses it:
+
+- **E = 15 MPa**, the D412 tensile modulus, as the small-strain modulus
+  of every strut. It's a datasheet value for bulk test pieces. Thin
+  printed struts can come out somewhat softer or stiffer (cure depth,
+  surface skin), which is part of why results are comparative (§13).
 - **ν = 0.49**: elastomers are nearly incompressible. Beam elements
   don't lock as ν → 0.5; ν only enters through G = E / 2(1+ν).
 - **No yield.** Elastomers fail by strain, not stress, so the check is
   on **peak fibre strain** rather than stress / yield. Two thresholds:
-  - *linear limit* (default 20 %): above it the linear result is no
-    longer trustworthy for that strut. Shown as a warning, per strut and
-    as a count
-  - *break* (250 %, from the datasheet): a hard flag. In practice the
-    linear limit is reached long before it
-- The 20 MPa tensile strength is a large-strain value. It is stored and
-  shown but not compared against linear stress: E × strain at 250 % is
-  nowhere near the real stress-strain curve.
+  - *linear limit* (**20 %**): above it the linear result is no longer
+    trustworthy for that strut. Shown as a warning, per strut and as a
+    count
+  - *break* (330 %, from the datasheet): a hard flag. The linear limit
+    is reached long before it
+- Tensile strength (26 MPa) is a large-strain value. It is stored and
+  shown but not compared against linear stress: E × strain at 330 % is
+  nowhere near the real stress-strain curve. Resilience, tear strength
+  and Tg are shown for reference only. They matter for energy return,
+  fatigue and cold-weather stiffening, none of which a linear static
+  model captures.
+- **Other resins** go in the same library. If a datasheet gives no
+  modulus, E is estimated from Shore A with Gent's relation (Gent 1958;
+  for EPU 46 it gives 8.3 MPa against the measured 15, a reminder of
+  how rough that is) and marked `estimated`.
+
+**What E changes.** With prescribed travel, the displacement field
+doesn't depend on E, so contact pattern and strains at a given *travel*
+are the same for any E; forces scale with E. With a force target, a
+stiffer material travels less, engages less of the footbed and outsole,
+and so strains at a given *force* do change with E. They don't scale
+in proportion, because contact spreads nonlinearly.
 
 ### 6.3 Supports: ground (`fea/contact.ts`)
 
@@ -339,10 +361,16 @@ previous step's stiffness so about `steps` (default 10) steps reach the
 target. Then interpolate within the last step, re-solving at the
 interpolated travel so the reported state is a real solve. The
 force-displacement curve stiffens as contact spreads, so the steps
-shrink as it goes. Presets in body weights for a body mass set in the
-sidebar (default 75 kg): 0.5 BW (standing on two feet), 1 BW (standing
-on one), 2.5 BW (running heel strike, flagged as beyond the linear
-range, §6.7).
+shrink as it goes.
+
+The target is set on a **slider from 0.5 to 2.5 × body weight** (step
+0.1) for a body mass in the sidebar (default 75 kg: 368–1,839 N), with
+the force in N shown beside it. Tick marks label the reference loads:
+0.5 standing on two feet, 1.0 standing on one, ~1.2 walking heel
+strike, ~2.5 running heel strike. One run steps to the slider's maximum
+and stores every step, so moving the slider afterwards just
+interpolates between stored steps and redraws. Only changing the
+geometry, the study or the maximum re-solves.
 
 ### 6.5 Assembly & solve (`fea/assemble.ts`, `fea/pcg.ts`)
 
@@ -383,35 +411,44 @@ balance the compressor force; the imbalance is shown as a check.
 Before fixing the design, a throwaway Python prototype (numpy / scipy,
 not part of the repo) ran this exact pipeline on the supplied files:
 clean → Timoshenko frame → compressor and ground contact with stick →
-linear solve. The settings were d = 1.5 mm, E = 7.85 MPa, ν = 0.49,
-whole lattice. The numbers are indicative, not validated, but they set
-the defaults and the order of work.
+linear solve. The settings were d = 1.5 mm, EPU 46 (E = 15 MPa,
+ν = 0.49), whole lattice, 75 kg body. The numbers are indicative, not
+validated, but they set the defaults and the order of work.
 
-| | |
-|---|---|
-| model | 9,104 nodes, 20,956 struts, 54,624 DOF; assembly 1.6 s, ~2 s per direct solve |
-| force vs. travel past first contact (2.0 mm) | 0.25 mm: 34 N · 0.5: 128 N · 1.0: 409 N · 1.5: 772 N · 2.0: 1,193 N · 2.5: 1,662 N |
-| stiffness | rises from ~380 to ~940 N/mm over that range, as contact spreads on both faces |
-| contact at 1 BW (735 N) | 1.46 mm past first contact; 704 compressor nodes, 550 ground nodes |
-| fibre strain at 1 BW | p95 9 %, p99 13 %, max 24 %; **10 struts** over 20 % |
-| fibre strain at ~2.3 BW (1,660 N) | p95 18 %, p99 23 %, max 42 %; **634 struts** over 20 % |
+Model: 9,104 nodes, 20,956 struts, 54,624 DOF; assembly ~2 s, ~2 s per
+direct solve.
+
+| load | force | travel past first contact | contact nodes (compressor / ground) | fibre strain p95 / p99 / max | struts over 20 % |
+|---|---|---|---|---|---|
+| 0.5 BW | 368 N | 0.63 mm | 516 / 365 | 2.7 / 4.9 / 9.7 % | 0 |
+| 1.0 BW | 736 N | 0.97 mm | 601 / 451 | 5.3 / 7.9 / 15.4 % | 0 |
+| 1.5 BW | 1,104 N | 1.25 mm | 658 / 516 | 7.6 / 10.6 / 20.3 % | 2 |
+| 2.0 BW | 1,472 N | 1.50 mm | 707 / 558 | 9.6 / 13.0 / 24.7 % | 10 |
+| 2.5 BW | 1,839 N | 1.74 mm | 743 / 598 | 11.6 / 15.3 / 28.8 % | 32 (0.15 %) |
+
+Stiffness rises from ~700 N/mm just after first contact to ~1,600 N/mm
+at 2.5 BW, as contact spreads across the footbed and the rocker outsole
+flattens onto the ground.
 
 What this changed:
 
-1. **Ground contact is in v0** (§6.3). With the ground fixed in a
-   0.5 mm band, the toe and heel never engaged and the stiffness was a
-   constant ~480 N/mm. With ground contact it stiffens as the rocker
-   flattens, which is the real behaviour.
-2. **The contact loop needs safeguards** (§6.4). Compressor-only contact
-   converged in 11–13 passes. With both surfaces it converged in the
-   first two steps (under 130 N), then cycled to the 60-pass cap. The total force was steady
-   across the cycling, so the result is usable, but it has to be handled
-   rather than left to luck.
-3. **Linear is credible up to about 1 BW, and not much beyond.** At
-   standing loads almost every strut stays under 20 % strain. At running
-   loads hundreds don't. So 1 BW is the default preset, 2.5 BW is
-   flagged, and large deformation (v2) is what running loads need.
-4. **Speed matters.** A run is ~10 steps × 10–15 passes, so per-pass
+1. **Ground contact is in v0** (§6.3). With the ground fixed in a 0.5 mm
+   band, the toe and heel never engaged and the stiffness stayed
+   constant. With ground contact it stiffens as the rocker flattens,
+   which is the real behaviour.
+2. **The contact loop needs safeguards** (§6.4). Compressor-only
+   contact converged in 11–13 passes. With both surfaces it converged up
+   to ~1 BW, then often cycled to the pass cap. The total force was
+   steady across the cycling, so the results are usable, but cycling has
+   to be handled rather than left to luck.
+3. **Linear holds over the whole slider range, with a few exceptions to
+   watch.** With EPU 46 even 2.5 BW keeps 99 % of struts under 15 %
+   strain. The 20 % flag catches a handful of hot struts (2 at 1.5 BW,
+   32 at 2.5 BW), and those, not the lattice as a whole, are where the
+   linear answer is in doubt. (An earlier run with a softer 7.85 MPa
+   estimate put 634 struts over 20 % at ~2.3 BW. The real modulus
+   matters.)
+4. **Speed matters.** A run is ~10 steps × 10–25 passes, so per-pass
    solve time sets the experience, and benchmarking PCG comes first in
    phase 2 (§6.5).
 
@@ -463,11 +500,11 @@ with a corner-tick frame, right tabbed panel, and a strip under the stage.
   - *groups*: one row per group with diameter (mm), include toggle and
     count. The group names come from the file; the unnamed group shows
     as `(no group)`
-  - *material*: Shore A, tensile strength, elongation at break, and E
-    (estimated from Shore unless typed in; marked `estimated`), ν,
-    linear strain limit
-  - *load*: force target (N or body weights, with body mass), steps,
-    stick / slip for compressor and ground
+  - *material*: EPU 46 by default, with its datasheet values (E,
+    tensile strength, elongation at break, Shore A) editable; ν; linear
+    strain limit (20 %)
+  - *load*: the force slider (0.5–2.5 × BW, force in N beside it), body
+    mass, steps, stick / slip for compressor and ground
   - *display*: layers (undeformed, deformed, compressor, ground,
     contact nodes, nodes), group visibility
 - **Stage:** struts as one `InstancedMesh` of cylinders (one draw call for
@@ -515,7 +552,7 @@ between solves without it.
 
 All lowercase, `#222` void, bone ink, hairline grids, square corners,
 corner-tick frame, no shadows, mechanical easing, no emoji. Studies and
-exports are named like files: `20261002_exported_lines.d1.5.sla77a.1bw`,
+exports are named like files: `20261002_exported_lines.d1.5.epu46.1bw`,
 `..._fd.csv`. Copy `src/styles/tokens.css` verbatim; port the `app.css`
 layout, `.btn`, `.block`, `.tabs`, `.mtable`, `.tick` and the view cube.
 
@@ -567,7 +604,7 @@ Each phase ends with something that runs and a test that proves it.
 | **1. import + clean** | `io/obj.ts`, `lattice/clean.ts`, `contact/surface.ts` | Vitest on small fixtures (two cells sharing an edge, a subdivided strut, a floating strut). On the reference shoe: 20,956 struts / 9,104 nodes, 1 component, footbed gaps 1.99–2.74 mm |
 | **2. element + solver core** | `element.ts` (Timoshenko frame), `assemble.ts`, `pcg.ts`, `cholesky.ts`, `recover.ts`; no UI | Vitest: cantilever tip δ = PL³/3EI + PL/κGA, axial bar PL/EA, torsion TL/GJ, fixed-fixed beam, a portal frame, all within 0.1 %; a subdivided strut matches the single-element strut; PCG matches Cholesky; reactions balance loads. Benchmark: one warm-started PCG solve of the reference shoe (55k DOF) in the browser, target < 0.5 s |
 | **3. stage** | OBJ geometry on the stage, instanced struts, group colours, compressor, section plane, view cube port | the reference shoe renders at 60 fps with all 21k struts |
-| **4. contact + worker** | compressor and ground contact (stick), active set with the §6.4 safeguards, force-target stepping, worker solve; deformed shape and fields | Vitest: a flat plate on a grid of vertical columns gives F = n·EA/L · (δ − g) after closing a known gap; tensile contacts release. Reference shoe at 1 BW: converges without hitting the pass cap, and lands within ~10 % of the prototype (§6.7: 1.46 mm past first contact, ~10 struts over 20 %), without blocking the UI |
+| **4. contact + worker** | compressor and ground contact (stick), active set with the §6.4 safeguards, force-target stepping, worker solve; deformed shape and fields | Vitest: a flat plate on a grid of vertical columns gives F = n·EA/L · (δ − g) after closing a known gap; tensile contacts release. Reference shoe, 0.5–2.5 BW sweep: converges without hitting the pass cap, and lands within ~10 % of the prototype (§6.7: 0.97 mm past first contact at 1 BW, 32 struts over 20 % at 2.5 BW), without blocking the UI |
 | **5. results + exports** | results / charts / model tabs, contact pressure map, per-region and per-group tables, exports | reaction balance < 0.1 % of applied force; `_deformed.obj` re-imports with the same topology |
 
 Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
@@ -580,7 +617,8 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
 - node stiffening: a rigid zone at each strut end sized from the joint;
   printed nodes make stubby lattices stiffer than bare struts
 - measured material: fit E (and later a hyperelastic model) to a
-  tensile or compression test of the resin, replacing the Shore estimate
+  compression test of a printed EPU 46 lattice coupon, replacing the
+  bulk datasheet modulus
 - per-strut diameters from the file. OBJ can't carry them, so this means
   reading Houdini's JSON `.geo` export (point attributes like `pscale`
   and named groups come through directly), or a CSV sidecar
@@ -589,9 +627,9 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
 
 **v2: large deformation**
 - geometric nonlinearity: corotational beam with load stepping, struts
-  re-subdivided (2–4 elements each) so they can bow. The prototype puts
-  hundreds of struts past 20 % strain by ~2.3 BW (§6.7); this is the
-  step that makes running loads trustworthy
+  re-subdivided (2–4 elements each) so they can bow. The prototype keeps
+  most struts under 20 % strain up to 2.5 BW (§6.7), but the hot struts
+  and anything softer or thinner need it
 - linear buckling: lowest eigenvalues of (K + λ K_G), mode shapes on the
   stage
 - hyperelastic struts (Neo-Hookean / Mooney-Rivlin fitted to the resin)
@@ -612,14 +650,15 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
 
 ## 13. Known limitations (to state in the UI and README)
 
-- **Linear, small displacement, on an elastomer.** Credible up to about
-  1 BW on the reference shoe, where almost all struts stay under 20 %
-  strain. Past that, struts over the linear limit are counted and
-  marked, and the summary says the result is outside the linear range.
-  Running loads need v2.
-- **E is estimated from Shore hardness** (±30 % or so) until a measured
-  modulus is entered. Force and stiffness scale with it; deformed shape
-  and strains at a given force don't depend on it.
+- **Linear, small displacement, on an elastomer.** On the reference
+  shoe in EPU 46, 99 % of struts stay under 15 % strain up to 2.5 BW.
+  Struts over the 20 % limit are counted and marked, and the summary
+  says when any exist. A softer material, thinner struts or a
+  heavier load moves more struts past the limit; those cases need v2.
+- **E is a bulk datasheet value** (EPU 46 D412). Printed struts 1.5 mm
+  across may differ from bulk test bars. Stiffness is directly
+  proportional to E, so a measured value from a printed lattice coupon
+  is the best calibration.
 - Junctions are points. Real printed nodes add material and stiffness
   and concentrate stress, so stiffness of stubby struts (L/d < ~5, which
   is most of this lattice) is underpredicted, and peak stresses at nodes
@@ -639,14 +678,16 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
 
 ## 14. Decisions and open questions
 
-Decided: 1.5 mm struts in every group; Shore 77A elastomeric SLA resin
-(20 MPa, 250 %); force-controlled load; the 2 mm start gap stays;
-the whole lattice; stick on both surfaces (§4.1).
+Decided (§4.1):
+- 1.5 mm struts in every group
+- Carbon EPU 46 from its technical data sheet (E 15 MPa, 26 MPa, 330 %,
+  Shore 78A)
+- force-controlled load on a 0.5–2.5 × body weight slider
+- 20 % peak fibre strain as the linear limit
+- the 2 mm start gap stays; the whole lattice; stick on both surfaces
 
-Still open (defaults are in place for each):
+Still open (defaults are in place):
 
-1. **Measured modulus.** A tensile or compression modulus for the resin
-   (or the resin's name) would replace the Shore estimate of 7.9 MPa.
-2. **Target force.** The default is 1 BW for a 75 kg body (736 N). Is
-   there a specific force, or a test standard to match?
-3. **Is 20 % the right linear limit** to flag, or should it be lower?
+1. **Body mass** for the slider. The default is 75 kg.
+2. **Printed modulus.** A compression test of a printed EPU 46 lattice
+   coupon would show how far the 1.5 mm struts are from the bulk 15 MPa.
