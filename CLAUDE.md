@@ -4,9 +4,12 @@ Guidance for working in this repository.
 
 ## What this is
 
-A client-side browser tool for linear static FEA of lattice beam models:
-generate or import a strut lattice, apply supports and loads, solve a 3D
-frame model in a Web Worker, and visualise deformation and stress.
+A client-side browser tool for linear static FEA of lattice beam models.
+It imports a lattice curve network (OBJ polylines) and a rigid compressor
+surface (OBJ triangles) from Houdini, steps the compressor down into the
+lattice with one-sided contact, solves a 3D frame model in a Web Worker,
+and visualises deformation and stress. It never generates or edits
+lattices.
 `ARCHITECTURE.md` is the design doc and results reference; read it before
 changing solver code. The repo is at the scoping stage. Build in the order
 of ARCHITECTURE.md §10.
@@ -22,9 +25,13 @@ Run `npm test` and `npm run typecheck` before every commit.
 ## Rules
 
 - **SI inside** (m, N, Pa). mm / N / MPa only at the UI and io boundaries.
-- **Z up** (build direction). Axial force + is tension.
-- **Geometry and study are separate.** Generators and importers produce a
-  `Lattice` only; supports, loads and material live in a `Study`.
+- **Keep the files' frame:** Y up, compressor travels in −Y, mm in files
+  and UI. Axial force + is tension.
+- **Geometry and study are separate.** Importers produce a `Lattice` and
+  an `Indenter` only; diameters, material, ground and load live in a
+  `Study`.
+- **Cleaning is reported, never silent.** Welds, deduplicated segments,
+  collapsed chains and dropped pieces all go in the `CleanReport`.
 - **The solver never touches the DOM.** `src/fea/` is pure TS and runs in
   the worker; the UI talks to it only through `fea/worker.ts`.
 - **Be honest about results.** Report solver residual and reaction
