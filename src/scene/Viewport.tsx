@@ -1,8 +1,9 @@
 /**
- * Three.js stage, phase-1 version: struts as hairlines (one draw call), the
- * compressor as a translucent sheet, and each node's start gap to the
- * compressor as points on the magnitude ramp. Instanced cylinder struts,
- * the view cube and the section plane come with phase 3.
+ * Three.js stage: struts as hairlines (one draw call), deformed and
+ * coloured by the selected result field once solved, over a faint
+ * undeformed ghost; the compressor as a translucent sheet at its travel;
+ * contact nodes; and, before solving, each node's start gap. Instanced
+ * cylinder struts, the view cube and the section plane come with phase 3.
  *
  * Visual rules (MORPHXGEN): near-black void, bone hairlines, coral only as
  * the indicator (the hovered group), ramp colours only on data marks.
@@ -14,11 +15,28 @@ import type { Indenter, Lattice } from '../core/types';
 import { magnitude, rgbCss } from '../core/colormap';
 import type { Layers } from '../ui/Sidebar';
 
+export interface Deform {
+  /** Displacements, 6 per node, m. */
+  u: Float64Array;
+  /** Display magnification. */
+  scale: number;
+  /** Compressor travel past first contact, m. */
+  travel: number;
+  firstContact: number;
+  /** Contact state per node (compressor or floor), > 0 in contact. */
+  contacts: Uint8Array;
+}
+
 interface Props {
   lattice: Lattice | null;
   indenter: Indenter | null;
   gaps: Float64Array | null;
+  deform: Deform | null;
+  /** Per strut, two vertices × rgb; null draws bone. */
+  colors: Float32Array | null;
   layers: Layers;
+  /** Hide struts lying entirely above this height (m); null shows all. */
+  clipY: number | null;
   hidden: Set<string>;
   hoverGroup: string | null;
   onDrop: (files: File[]) => void;
@@ -32,6 +50,8 @@ interface Stage {
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
   lattice: THREE.Group;
+  ghost: THREE.Group;
+  contacts: THREE.Group;
   compressor: THREE.Group;
   gaps: THREE.Group;
   grid: THREE.Group;
@@ -71,7 +91,7 @@ function buildGrid(lat: Lattice): THREE.Group {
   return g;
 }
 
-export function Viewport({ lattice, indenter, gaps, layers, hidden, hoverGroup, onDrop }: Props) {
+export function Viewport({ lattice, indenter, gaps, deform, colors, layers, clipY, hidden, hoverGroup, onDrop }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const stage = useRef<Stage | null>(null);
   const [drag, setDrag] = useState(false);
@@ -89,9 +109,10 @@ export function Viewport({ lattice, indenter, gaps, layers, hidden, hoverGroup, 
     camera.position.set(0.5, 0.3, 0.4);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    const lattice = new THREE.Group(), compressor = new THREE.Group(), gapsG = new THREE.Group(), grid = new THREE.Group();
-    scene.add(grid, lattice, compressor, gapsG);
-    stage.current = { renderer, scene, camera, controls, lattice, compressor, gaps: gapsG, grid, framed: false };
+    const lattice = new THREE.Group(), ghost = new THREE.Group(), contacts = new THREE.Group();
+    const compressor = new THREE.Group(), gapsG = new THREE.Group(), grid = new THREE.Group();
+    scene.add(grid, ghost, lattice, contacts, compressor, gapsG);
+    stage.current = { renderer, scene, camera, controls, lattice, ghost, contacts, compressor, gaps: gapsG, grid, framed: false };
 
     const resize = () => {
       const w = el.clientWidth, h = el.clientHeight;
@@ -113,37 +134,61 @@ export function Viewport({ lattice, indenter, gaps, layers, hidden, hoverGroup, 
       cancelAnimationFrame(raf);
       ro.disconnect();
       controls.dispose();
-      [lattice, compressor, gapsG, grid].forEach(dispose);
+      [lattice, ghost, contacts, compressor, gapsG, grid].forEach(dispose);
       renderer.dispose();
       el.removeChild(renderer.domElement);
       stage.current = null;
     };
   }, []);
 
-  // Struts, rebuilt when the lattice, hidden groups or hovered group change.
+  // Struts, rebuilt when the lattice, the result shown, hidden groups or
+  // the hovered group change. ~60k vertices: cheap enough to rebuild on
+  // every slider move.
   useEffect(() => {
     const s = stage.current;
     if (!s) return;
     dispose(s.lattice);
+    dispose(s.ghost);
+    dispose(s.contacts);
     dispose(s.grid);
     if (!lattice) return;
     const bone = new THREE.Color(css('--mx-bone'));
     const coral = new THREE.Color(css('--accent'));
     const n = lattice.struts.length / 2;
-    const pos: number[] = [], col: number[] = [];
-    for (let k = 0; k < n; k++) {
-      const g = lattice.groups[lattice.strutGroup[k]];
+    const P = lattice.nodes;
+    const at = (node: number, k: number) => P[3 * node + k] + (deform ? deform.u[6 * node + k] * deform.scale : 0);
+    const pos: number[] = [], col: number[] = [], ghost: number[] = [];
+    for (let e = 0; e < n; e++) {
+      const g = lattice.groups[lattice.strutGroup[e]];
       if (hidden.has(g)) continue;
-      const c = g === hoverGroup ? coral : bone;
-      for (const end of [lattice.struts[2 * k], lattice.struts[2 * k + 1]]) {
-        pos.push(lattice.nodes[3 * end], lattice.nodes[3 * end + 1], lattice.nodes[3 * end + 2]);
-        col.push(c.r, c.g, c.b);
+      if (clipY !== null && Math.min(P[3 * lattice.struts[2 * e] + 1], P[3 * lattice.struts[2 * e + 1] + 1]) > clipY) continue;
+      for (let v = 0; v < 2; v++) {
+        const node = lattice.struts[2 * e + v];
+        pos.push(at(node, 0), at(node, 1), at(node, 2));
+        if (deform) ghost.push(P[3 * node], P[3 * node + 1], P[3 * node + 2]);
+        if (g === hoverGroup) col.push(coral.r, coral.g, coral.b);
+        else if (colors) col.push(colors[6 * e + 3 * v], colors[6 * e + 3 * v + 1], colors[6 * e + 3 * v + 2]);
+        else col.push(bone.r, bone.g, bone.b);
       }
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-    s.lattice.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false })));
+    // Coloured results draw opaque so the ramp reads true; bare geometry
+    // stays a translucent hairline.
+    s.lattice.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: !colors, opacity: colors ? 1 : 0.5, depthWrite: !!colors,
+    })));
+    if (deform) {
+      const gg = new THREE.BufferGeometry();
+      gg.setAttribute('position', new THREE.Float32BufferAttribute(ghost, 3));
+      s.ghost.add(new THREE.LineSegments(gg, new THREE.LineBasicMaterial({ color: bone, transparent: true, opacity: 0.08, depthWrite: false })));
+      const cp: number[] = [];
+      deform.contacts.forEach((c, node) => { if (c && (clipY === null || P[3 * node + 1] <= clipY)) cp.push(at(node, 0), at(node, 1), at(node, 2)); });
+      const cg = new THREE.BufferGeometry();
+      cg.setAttribute('position', new THREE.Float32BufferAttribute(cp, 3));
+      s.contacts.add(new THREE.Points(cg, new THREE.PointsMaterial({ color: new THREE.Color(css('--mx-white')), size: 2, sizeAttenuation: false })));
+    }
     s.grid.add(buildGrid(lattice));
 
     // Frame once, on the first lattice; later loads keep the user's view.
@@ -158,7 +203,7 @@ export function Viewport({ lattice, indenter, gaps, layers, hidden, hoverGroup, 
       s.camera.updateProjectionMatrix();
       s.framed = true;
     }
-  }, [lattice, hidden, hoverGroup]);
+  }, [lattice, hidden, hoverGroup, deform, colors, clipY]);
 
   // Compressor: translucent sheet plus faint wireframe.
   useEffect(() => {
@@ -200,14 +245,29 @@ export function Viewport({ lattice, indenter, gaps, layers, hidden, hoverGroup, 
     setGapScale([gmin, gmin + span]);
   }, [lattice, gaps]);
 
+  // The compressor sits at its travel: first contact plus the travel past
+  // it, magnified like the lattice so it meets the deformed footbed.
   useEffect(() => {
     const s = stage.current;
     if (!s) return;
+    s.compressor.position.y = deform ? -(deform.firstContact + deform.travel * deform.scale) : 0;
+    // Fainter over results, so it doesn't veil the coloured footbed.
+    s.compressor.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      if (m) m.opacity = (o instanceof THREE.Mesh ? 0.08 : 0.12) * (deform ? 0.4 : 1);
+    });
+  }, [deform, indenter]);
+
+  useEffect(() => {
+    const s = stage.current;
+    if (!s) return;
+    s.ghost.visible = layers.undeformed;
+    s.contacts.visible = layers.contacts;
     s.lattice.visible = layers.lattice;
     s.compressor.visible = layers.compressor;
     s.gaps.visible = layers.gaps;
     s.grid.visible = layers.grid;
-  }, [layers, lattice, indenter, gaps]);
+  }, [layers, lattice, indenter, gaps, deform, colors]);
 
   return (
     <div

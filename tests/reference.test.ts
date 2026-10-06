@@ -9,15 +9,19 @@ import { describe, expect, it } from 'vitest';
 import { importObjText } from '../src/io/index';
 import { gapReport, nodeGaps } from '../src/contact/surface';
 import { strutLengths } from '../src/lattice/clean';
+import { runSweep } from '../src/fea/solve';
+import { sweepInput } from '../src/fea/input';
+import { defaultStudy, withGroups } from '../src/study/study';
 
 const dir = fileURLToPath(new URL('./fixtures/local/', import.meta.url));
 const LATTICE = `${dir}20261002_exported_lines.obj`;
 const COMPRESSOR = `${dir}compressor.obj`;
 const present = existsSync(LATTICE) && existsSync(COMPRESSOR);
 
+const lat = present ? importObjText(readFileSync(LATTICE, 'utf8'), 'lattice') : null;
+const ind = present ? importObjText(readFileSync(COMPRESSOR, 'utf8'), 'compressor') : null;
+
 describe.skipIf(!present)('reference shoe', () => {
-  const lat = present ? importObjText(readFileSync(LATTICE, 'utf8'), 'lattice') : null;
-  const ind = present ? importObjText(readFileSync(COMPRESSOR, 'utf8'), 'compressor') : null;
 
   it('cleans to 30,683 struts on 18,831 nodes in one piece', () => {
     if (lat?.kind !== 'lattice') throw new Error('expected a lattice');
@@ -60,4 +64,21 @@ describe.skipIf(!present)('reference shoe', () => {
     expect(footbed.length).toBe(2106);
     expect(Math.max(...footbed) * 1e3).toBeLessThan(3);
   });
+});
+
+describe.skipIf(!present)('reference shoe, first solve step', () => {
+  it('balances reactions and holds contacts at 1.5 mm struts in EPU 46', () => {
+    if (lat?.kind !== 'lattice' || ind?.kind !== 'indenter') throw new Error('fixtures');
+    const input = sweepInput(lat.lattice, nodeGaps(ind.indenter, lat.lattice), withGroups(defaultStudy(), lat.lattice.groups));
+    // One step, 0.3 mm past first contact: the prototype's force-travel
+    // curve puts this at ~80 N (ARCHITECTURE.md §6.7).
+    const res = runSweep({ ...input, targets: [1] });
+    const s = res.steps[0];
+    expect(s.converged).toBe(true);
+    expect(Math.abs(s.force - s.groundForce) / s.force).toBeLessThan(1e-6);
+    expect(s.residual).toBeLessThan(1e-5);
+    expect(s.violation).toBeLessThan(1e-9);
+    expect(s.force).toBeGreaterThan(60);
+    expect(s.force).toBeLessThan(110);
+  }, 180_000);
 });

@@ -12,14 +12,14 @@ and visualises deformation and stress. It never generates or edits
 lattices.
 `ARCHITECTURE.md` is the design doc and results reference; read it before
 changing solver code. Build in the order
-of ARCHITECTURE.md §11 (phases 0–1 are done).
+of ARCHITECTURE.md §11 (phases 0, 1, 2 and 4 are done).
 
 ## Commands
 
 - `npm run dev`: dev server on :5173
-- `npm test`: Vitest (import/cleaning fixtures; the reference shoe in
-  `tests/fixtures/local/`, gitignored, when present; solver vs.
-  closed-form results from phase 2)
+- `npm test`: Vitest (import/cleaning fixtures; elements and solver vs.
+  closed-form results; the reference shoe in `tests/fixtures/local/`,
+  gitignored, when present, including one ~20 s solve step)
 - `npm run typecheck` / `npm run build`
 
 Run `npm test` and `npm run typecheck` before every commit.
@@ -31,10 +31,13 @@ src/core/       types, colormap (ported from human_data_capture)
 src/io/         obj.ts (parser), index.ts (router, mm → m)
 src/lattice/    clean.ts (weld, dedupe, Douglas–Peucker, connectivity)
 src/contact/    surface.ts (compressor, xz grid, vertical gaps)
+src/fea/        element, model (node-block K), order (nested dissection),
+                cholesky (factor + rank-1), solve (contact steps), input,
+                results (slider interpolation), worker + client
 src/materials/  library.ts (EPU 46 family, from Carbon's datasheet)
 src/study/      study.ts (diameters, material, body-weight load)
 src/scene/      Viewport.tsx (three.js)
-src/ui/         Toolbar, Sidebar, ModelPanel
+src/ui/         Toolbar, Sidebar, FieldStrip, Results/Charts/ModelPanel
 src/styles/     tokens.css (verbatim from human_data_capture) + app.css
 tests/          vitest
 ```
