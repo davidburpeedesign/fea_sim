@@ -4,7 +4,9 @@ import { BW_RANGE, BW_TICKS, targetForce, type Study } from '../study/study';
 
 export interface Layers {
   lattice: boolean;
+  undeformed: boolean;
   compressor: boolean;
+  contacts: boolean;
   gaps: boolean;
   grid: boolean;
 }
@@ -20,6 +22,13 @@ interface Props {
   onHidden: (h: Set<string>) => void;
   hoverGroup: string | null;
   onHoverGroup: (g: string | null) => void;
+  /** Height clip, m; null = off. */
+  clipY: number | null;
+  onClipY: (y: number | null) => void;
+  /** Solve state for the button: why it can't run, or what it's doing. */
+  solve: { can: boolean; running: boolean; stale: string | null; note: string };
+  onSolve: () => void;
+  onCancel: () => void;
 }
 
 const mm = (m: number) => +(m * 1e3).toFixed(3);
@@ -177,6 +186,12 @@ export function Sidebar(p: Props) {
           </span>
           <label>friction</label><span className="num">stick</span>
         </div>
+        <div className="block__actions solve">
+          {p.solve.running
+            ? <button className="btn" onClick={p.onCancel}>cancel</button>
+            : <button className="btn btn--primary" disabled={!p.solve.can} onClick={p.onSolve}>solve</button>}
+          <span className={p.solve.stale ? 'solve__note warn' : 'solve__note muted'}>{p.solve.stale ?? p.solve.note}</span>
+        </div>
       </section>
 
       <section className="block">
@@ -189,6 +204,24 @@ export function Sidebar(p: Props) {
             </label>
           ))}
         </div>
+        {lattice && (
+          <div className="fields">
+            <label>hide above</label>
+            <span className="num">{p.clipY === null ? 'off' : `${(p.clipY * 1e3).toFixed(0)} mm`}</span>
+            <input
+              className="fields__wide"
+              type="range"
+              min={lattice.bounds.min[1]}
+              max={lattice.bounds.max[1]}
+              step={0.5e-3}
+              value={p.clipY ?? lattice.bounds.max[1]}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                p.onClipY(v >= lattice.bounds.max[1] - 1e-9 ? null : v);
+              }}
+            />
+          </div>
+        )}
       </section>
     </aside>
   );

@@ -9,9 +9,13 @@ deformed shape, strut forces and stresses, the force-displacement curve
 and the contact pressure map. It doesn't generate lattices: all geometry
 comes from Houdini. Everything runs client-side.
 
-**Status: phases 0–1 built.** The app imports and cleans the lattice and
-compressor, and shows the model, the cleaning report and the start gaps.
-The solver (phases 2 and 4) is next. [ARCHITECTURE.md](./ARCHITECTURE.md)
+**Status: phases 0, 1, 2 and 4 built.** Import and clean the lattice and
+compressor, press **solve**, and the compressor steps down to 2.5 × body
+weight (~95 s for the reference shoe, in a worker). The stage shows the
+deformed lattice coloured by displacement, fibre strain or axial force;
+the force slider moves through the solved range without re-solving.
+Next: phase 3 (instanced struts, section plane, view cube) and phase 5
+(exports, contact pressure map). [ARCHITECTURE.md](./ARCHITECTURE.md)
 has the scope, solver design, interface and build phases.
 [MORPHXGEN-visual-language.md](./MORPHXGEN-visual-language.md) is the
 visual system, shared with

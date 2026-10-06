@@ -148,7 +148,7 @@ look.
 | ui | React 18 | panels are plain components |
 | build | Vite | static output, `base: './'` |
 | 3d | three.js | instanced struts, OBJ loading, orbit controls, view cube (ported from `human_data_capture`) |
-| solver | hand-written TS, in a Web Worker | sparse assembly + preconditioned CG; no WASM toolchain in v0 |
+| solver | hand-written TS, in a Web Worker | node-block sparse Cholesky with rank-1 contact updates (§6.5); no WASM toolchain in v0 |
 | charts | hand-written canvas | same as `human_data_capture` |
 | tests | Vitest | elements and solver verified against closed-form results |
 | hosting | GitHub Pages via Actions | copy `.github/workflows/deploy.yml` |
@@ -173,13 +173,14 @@ groups the cleaning step needs.
  (triangles)                     xz grid of triangles, down        rigid surface +
                                  ray casts; gap per lattice node   per-node gap
 
- Lattice + Indenter + Study ──► worker: fea/solve.ts ──► Result ──► scene/Viewport,
- (diameters, material,           ├─ element.ts   12×12 beam         ui/ResultsPanel,
-  ground, load target)           ├─ assemble.ts  sparse K (CSR)     ui/ChartsPanel,
-                                 ├─ pcg.ts       block-Jacobi CG    io/export
-                                 ├─ contact.ts   active set per step
-                                 └─ recover.ts   forces, stresses,
-                                                 reactions, pressure
+ Lattice + Indenter + Study ──► worker: fea/solve.ts ──► steps ──► fea/results.ts ──► scene/Viewport,
+ (diameters, material,           ├─ element.ts   12×12 beam         (slider: interpolate,   ui/ResultsPanel,
+  ground, load target)           ├─ model.ts     node-block K       E rescale)              ui/ChartsPanel,
+                                 ├─ order.ts     nested dissection                          ui/FieldStrip
+                                 ├─ cholesky.ts  factor, solve,
+                                 │               rank-1 update
+                                 └─ solve.ts     contact steps,
+                                                 strut forces, strain
 ```
 
 ### 4.1 Study defaults (decided)
@@ -353,7 +354,7 @@ stiffer material travels less, engages less of the footbed and outsole,
 and so strains at a given *force* do change with E. They don't scale
 in proportion, because contact spreads nonlinearly.
 
-### 6.3 Supports: ground (`fea/contact.ts`)
+### 6.3 Supports: ground (`fea/solve.ts`)
 
 The outsole stands on a rigid floor at the lowest point of the lattice
 (y = −13.0 mm in the reference file). The ground is a second contact
@@ -368,97 +369,121 @@ hang free and the compressor can't load them. As the outsole flattens,
 more of it touches down, and that growing footprint is a large part of
 the stiffness.
 
-### 6.4 Load: the compressor (`fea/contact.ts`)
+### 6.4 Load: the compressor (`fea/solve.ts`)
 
 The compressor is rigid and moves only in −Y, by travel δ. A lattice
 node under its footprint with initial gap g is in contact when δ ≥ g.
-In contact, the node's uy is prescribed to −(δ − g); with `stick`
-friction (the default) ux and uz are held at 0 too, with `slip` they're
-free.
+In contact, the node's uy is held at −(δ − g), and with stick its ux and
+uz are held at 0 too. Floor contacts are the same with the floor's gap.
 
-Contact is one-sided: the compressor pushes and can't pull. Each load
-step therefore runs a small **active-set loop**:
+Contacts are imposed as **penalty springs** on the held dofs, 1e8 × the
+dof's own stiffness, which holds a contact to ~1e-8 of its prescribed
+displacement (the measured violation is ~1e-11 m and is reported). The
+point of penalties rather than eliminating dofs: a contact change only
+changes the diagonal, which the factor absorbs as a rank-1 update
+(§6.5).
 
-1. start from the previous step's contact sets (compressor and ground)
-   plus any node whose gap has closed
-2. solve the linear system with those nodes prescribed
-3. release any contact node whose reaction pulls instead of pushes;
-   add any free node that has passed through either surface
-4. repeat until neither set changes
+Contact is one-sided: the compressor and floor push and can't pull. Each
+load step runs an **active-set loop**:
 
-Passes are cheap: K doesn't change, only which DOFs are prescribed, and
-PCG warm-starts from the last pass. The plain loop isn't enough on this
-model, though (§6.7). With both surfaces in contact it can cycle, with
-the same few nodes released and re-added on alternate passes. So the
-loop needs:
-- tolerances on both tests (reaction 1e-3 N, penetration 1e-3 mm)
-- releasing only the worst tensile nodes per pass when many flip
-  (largest first), and remembering nodes that have already flipped
-  twice
-- a pass cap, with the result reported as `contact not converged`
-  rather than shown as clean
+1. **start set:** on the first step, every node whose gap has closed; on
+   later steps, the previous step's set plus the nodes that the
+   previous solution, scaled by the travel ratio, puts through either
+   surface. Starting from every closed gap instead re-adds hundreds of
+   nodes released in earlier steps, and costs several refactors a step
+2. solve, then compute the constraint force on each contact node (K u)
+3. **release** contacts that pull, the most-pulling first. All of them go
+   in one pass by default, but when more than 10 % of a pass's releases
+   come back through the surface the next pass releases half as many,
+   doubling back once re-entries fall under 2 %. Releasing everything at
+   once oscillated; releasing a fixed quarter took 30+ passes
+4. **add** free nodes that have passed through either surface (> 1 µm)
+5. repeat until nothing changes. A node that has changed state three
+   times in a step is held where it is (anti-cycling) and counted. A
+   warning is raised only past 1 % of contacts or at the pass cap (30)
 
-If that still cycles on real models, switch to an augmented Lagrangian
-contact (stiff penalty springs plus multiplier updates), which converges
-smoothly at the cost of a few more solves.
+On the reference shoe this settles in 4–13 passes a step, with 0–10 of
+~1,800 contacts held by the anti-cycling rule.
+
+*Tried and dropped:* a third, sliding state (stick → normal-only →
+free), on the reasoning that under Coulomb friction a contact with no
+normal force can't hold a tangential one. It stopped the cycling but
+needed 50+ passes and ended with ~40 % of contacts sliding, which drifts
+from the stick condition the study asks for. Staged release fixed the
+cycling without it. The code keeps it behind an option (`slip`).
 
 The compressor starts 2 mm clear of the footbed, as modelled. That gap
 is deliberate (no collision at the start) and needs no adjusting:
 stepping begins at the smallest gap, so no solves are spent on empty
-travel. If a future file starts slightly interpenetrating, those nodes
-are reported and start in contact at zero gap, and the UI offers to
-raise the compressor by the overlap.
+travel.
 
-**Force target:** step δ from first contact, with steps sized from the
-previous step's stiffness so about `steps` (default 10) steps reach the
-target. Then interpolate within the last step, re-solving at the
-interpolated travel so the reported state is a real solve. The
-force-displacement curve stiffens as contact spreads, so the steps
-shrink as it goes.
+**Stepping:** the first step is 0.3 mm past first contact; each next
+step aims at the next force target (every 0.5 BW) using the slope of the
+last step, with the travel increment capped at 0.3 mm. The cap matters:
+the curve stiffens ~3× over the first millimetre, so an uncapped
+secant from the first step jumped from 56 N to 1,088 N, and the slider
+then interpolated across a span that isn't close to straight (it
+under-read peak strain at 1 BW by ~15 %). Capped, the reference shoe
+takes 8 steps to 2.5 BW.
 
 The target is set on a **slider from 0.5 to 2.5 × body weight** (step
 0.1) for a body mass in the sidebar (default 75 kg: 368–1,839 N), with
 the force in N shown beside it. Tick marks label the reference loads:
 0.5 standing on two feet, 1.0 standing on one, ~1.2 walking heel
 strike, ~2.5 running heel strike. One run steps to the slider's maximum
-and stores every step, so moving the slider afterwards just
-interpolates between stored steps and redraws. Only changing the
-geometry, the study or the maximum re-solves.
+and streams each step to the UI as it's solved; moving the slider then
+interpolates linearly between the two solved steps around the target
+(`fea/results.ts`). Changing material doesn't re-solve either: K ∝ E
+with ν fixed, so at a given travel the displacements, contact set and
+strains are unchanged and forces scale with E. Changing diameters or
+geometry marks the result stale; a target past the solved range says
+so.
 
-### 6.5 Assembly & solve (`fea/assemble.ts`, `fea/pcg.ts`)
+### 6.5 Assembly & solve (`fea/model.ts`, `fea/order.ts`, `fea/cholesky.ts`)
 
-- DOF numbering; prescribed DOFs (ground, contact) are eliminated, their
-  displacements moved to the right-hand side.
-- Global K assembled straight into **CSR** (symbolic pass for the
-  pattern, numeric pass for values). The pattern depends only on the
-  lattice, so it is built once per import. Each contact pass only
-  changes which DOFs are eliminated.
-- **Preconditioned conjugate gradient**, block-Jacobi (6×6 per node).
-  Each contact pass warm-starts from the previous solution. Stop at
-  relative residual 1e-8; report iterations and residual.
-- A dense Cholesky solve for small models (< ~1,500 DOF), used by the
-  tests as a reference for PCG.
-- Runs in a **Web Worker**; buffers are transferred, not copied. The UI
-  shows `solving...` and stays responsive.
+- K is assembled into **node-block sparse rows** (6×6 blocks, both
+  triangles stored, so a matvec is one pass).
+- **Direct solve.** Nodes are ordered by **geometric nested dissection**
+  (George 1973: split at the median of the longest extent, separator
+  last, recursively). The factor is a left-looking **block Cholesky**
+  with dense 6×6 kernels.
+- **Rank-1 updates.** Each contact change is a rank-1 update or downdate
+  of the factor along one elimination-tree path (Davis & Hager 1999;
+  CSparse `cs_updown`). Before each pass the solver times both options
+  and picks the cheaper: updates for a few hundred dofs, a refactor
+  beyond that.
+- Runs in a **Web Worker** (`fea/worker.ts`); the UI never imports the
+  solver directly.
 
-**Size:** the reference shoe after cleaning is 18,831 nodes, 30,683
-struts, ~113k DOF. A sparse direct solve took ~2 s per pass in the Python
-prototype. A full run is 10 steps × ~10–15 contact passes, so per-pass
-speed matters. Warm-started PCG on a fixed K should get each pass well
-under a second, but that is the first thing to benchmark in phase 2. If
-it isn't, the fallback is a sparse Cholesky of K, factored once per
-import and updated per contact pass. Skipping the chain collapse would
-make it ~570k DOF, which is the main reason the simplification is in
-v0.
+**Why not conjugate gradients, as first planned.** Measured on the
+reference shoe (113k DOF, in Python first):
 
-### 6.6 Checks before solving
+| approach | result |
+|---|---|
+| CG, block-Jacobi preconditioner | 2,364 iterations per solve (~6 s in scipy) |
+| … warm-started from the previous pass or step | 1,900–2,300 iterations: barely helps, and a run is ~100 solves |
+| CG, incomplete LU | doesn't converge (non-symmetric preconditioner) |
+| CG, two-level aggregation (rigid-body coarse space) | 100–200 iterations, but needs a large coarse solve or a full multigrid hierarchy |
+| banded (RCM) Cholesky | 1.2 GB: out |
+| nested-dissection block Cholesky | ~620k blocks (~170 MB), 4.6 s per factorization in Node |
+| rank-1 update of that factor | 4.6 ms per dof |
 
-Caught up front with a plain message: no outsole nodes near the floor, no
-lattice nodes under the compressor, a group with no diameter, included
-parts that aren't connected to the ground (e.g. excluding the connectors
-leaves the skins floating). A PCG run that doesn't converge reports that
-instead of drawing a wrong shape. After solving, ground reactions must
-balance the compressor force; the imbalance is shown as a check.
+**Size and time:** the reference shoe is 18,831 nodes, 30,683 struts,
+112,986 DOF. One solve with the factor is 0.1 s, a matvec 16 ms. A full
+run to 2.5 BW takes ~95 s in headless Chromium (8 steps, ~14
+factorizations, ~5,000 updates); the first step shows after ~27 s.
+Factorization dominates, so a supernodal kernel or WASM is the next
+speed-up (§12). Skipping the chain simplification would make it ~570k
+DOF.
+
+### 6.6 Checks
+
+Caught up front with a plain message: no lattice nodes under the
+compressor. A factor that isn't positive definite (nothing holding the
+lattice) stops the run with a message. After solving, each step reports:
+reaction balance (compressor force against floor reaction), the residual
+on free dofs relative to the constraint forces, the largest contact
+violation, passes, and contacts held by anti-cycling.
 
 ### 6.7 Prototype check on the reference shoe
 
@@ -469,16 +494,23 @@ linear solve. The settings were d = 1.5 mm, EPU 46 (E = 15 MPa,
 ν = 0.49), whole lattice, 75 kg body. The numbers are indicative, not
 validated, but they set the defaults and the order of work.
 
-Model: 9,104 nodes, 20,956 struts, 54,624 DOF; assembly ~2 s, ~2 s per
-direct solve.
+Model: 18,831 nodes, 30,683 struts, 112,986 DOF (the phase 1 cleaning,
+bowed skin edges kept to 0.05 mm); assembly ~2.4 s, ~4 s per direct
+solve.
 
 | load | force | travel past first contact | contact nodes (compressor / ground) | fibre strain p95 / p99 / max | struts over 20 % |
 |---|---|---|---|---|---|
-| 0.5 BW | 368 N | 0.63 mm | 516 / 365 | 2.7 / 4.9 / 9.7 % | 0 |
-| 1.0 BW | 736 N | 0.97 mm | 601 / 451 | 5.3 / 7.9 / 15.4 % | 0 |
-| 1.5 BW | 1,104 N | 1.25 mm | 658 / 516 | 7.6 / 10.6 / 20.3 % | 2 |
-| 2.0 BW | 1,472 N | 1.50 mm | 707 / 558 | 9.6 / 13.0 / 24.7 % | 10 |
-| 2.5 BW | 1,839 N | 1.74 mm | 743 / 598 | 11.6 / 15.3 / 28.8 % | 32 (0.15 %) |
+| 0.5 BW | 368 N | 0.64 mm | 643 / 535 | 1.3 / 4.6 / 9.6 % | 0 |
+| 1.0 BW | 736 N | 0.98 mm | 764 / 653 | 3.3 / 7.6 / 15.4 % | 0 |
+| 1.5 BW | 1,104 N | 1.26 mm | 841 / 751 | 5.5 / 10.2 / 20.3 % | 2 |
+| 2.0 BW | 1,472 N | 1.52 mm | 911 / 812 | 7.6 / 12.6 / 24.7 % | 12 |
+| 2.5 BW | 1,839 N | 1.75 mm | 953 / 861 | 9.4 / 14.8 / 28.7 % | 36 (0.12 %) |
+
+An earlier run that wrongly made every skin edge straight (20,956
+struts on 9,104 nodes) gave nearly the same curve: 0.97 mm at 1 BW,
+32 struts over 20 % at 2.5 BW. Under this load the force goes mainly
+through the straight midsole struts, so the bowed skins barely change
+it. They'll matter more for loads that stretch the skins.
 
 Stiffness rises from ~700 N/mm just after first contact to ~1,600 N/mm
 at 2.5 BW, as contact spreads across the footbed and the rocker outsole
@@ -498,13 +530,17 @@ What this changed:
 3. **Linear holds over the whole slider range, with a few exceptions to
    watch.** With EPU 46 even 2.5 BW keeps 99 % of struts under 15 %
    strain. The 20 % flag catches a handful of hot struts (2 at 1.5 BW,
-   32 at 2.5 BW), and those, not the lattice as a whole, are where the
+   36 at 2.5 BW), and those, not the lattice as a whole, are where the
    linear answer is in doubt. (An earlier run with a softer 7.85 MPa
    estimate put 634 struts over 20 % at ~2.3 BW. The real modulus
    matters.)
 4. **Speed matters.** A run is ~10 steps × 10–25 passes, so per-pass
-   solve time sets the experience, and benchmarking PCG comes first in
-   phase 2 (§6.5).
+   solve time sets the experience. That is what led to the direct solver
+   with rank-1 updates (§6.5).
+
+The TypeScript solver (phase 4) reproduces these numbers: 0.981 mm past
+first contact at 1 BW with peak fibre strain 15.4 % and p99 7.6 %, and
+36 struts over 20 % at 2.5 BW.
 
 ---
 
@@ -559,9 +595,12 @@ with a corner-tick frame, right tabbed panel, and a strip under the stage.
     values (E, tensile strength, elongation at break, Shore A, density)
     editable; ν; linear strain limit (20 %)
   - *load*: the force slider (0.5–2.5 × BW, force in N beside it), body
-    mass, steps, stick / slip for compressor and ground
-  - *display*: layers (undeformed, deformed, compressor, ground,
-    contact nodes, nodes), group visibility
+    mass, friction, and **solve** / **cancel** with a one-line state
+    (steps solved, or why the result is stale)
+  - *display*: layers (lattice, undeformed ghost, compressor, contact
+    nodes, start gaps, grid), and a **hide above** height slider: until
+    the section plane lands in phase 3, cutting at ~2 mm (just above the
+    footbed) is how to see the midsole
 - **Stage:** struts as one `InstancedMesh` of cylinders (one draw call for
   all 21k struts), coloured per instance. The undeformed lattice stays as
   bone hairlines (`--mx-bone-16`) under the deformed one, like the ghost
@@ -570,11 +609,12 @@ with a corner-tick frame, right tabbed panel, and a strip under the stage.
   field is selected. A **section plane** (X or Z, draggable) is essential
   here. The midsole is hidden inside the upper and skins, so slicing is
   how anyone sees it.
-- **Under-stage strip** (replaces the gait timeline): result field
-  selector, deformation scale (default 1×, since real displacements of a
-  few mm are visible at this size; the factor is always printed), a scrub
-  across load steps that animates the compression, and the colour legend
-  with its numeric scale.
+- **Under-stage strip** (replaces the gait timeline, built in phase 4):
+  result field (displacement, fibre strain, axial force), deformation
+  magnification (1, 2, 5, 10×; the compressor moves with it so it meets
+  the deformed footbed), the colour legend with its numeric scale, and a
+  readout of force and travel. The struts are hairlines coloured per
+  vertex for now; instanced cylinders come with phase 3.
 - **Right panel tabs:**
   - `results`: summary table (stiffness, max travel and force, max
     displacement, peak fibre strain and linear-limit count, reaction
@@ -629,14 +669,15 @@ layout, `.btn`, `.block`, `.tabs`, `.mtable`, `.tick` and the view cube.
 ## 10. Proposed layout
 
 ```
-src/core/       types, units, vec/mat3, colormap (from human_data_capture)
+src/core/       types, colormap (from human_data_capture)
 src/io/         obj.ts (points, polylines, triangles, groups), export.ts,
                 index.ts router
 src/lattice/    clean.ts (weld, dedupe, simplify, connectivity, report)
 src/contact/    surface.ts (xz grid, ray cast, gaps, tributary areas)
-src/fea/        element.ts, dof.ts, assemble.ts (CSR), pcg.ts, cholesky.ts,
-                contact.ts (active set, stepping), recover.ts, solve.ts,
-                worker.ts
+src/fea/        element.ts, model.ts (node-block K), order.ts (nested
+                dissection), cholesky.ts (factor, solve, rank-1),
+                solve.ts (contact steps, recovery), input.ts, results.ts
+                (slider interpolation), worker.ts + client.ts
 src/study/      study.ts (Study, defaults, body-weight slider), ground.ts
 src/materials/  library.ts
 src/scene/      Viewport.tsx (instanced struts, compressor, section plane),
@@ -658,9 +699,9 @@ Each phase ends with something that runs and a test that proves it.
 |---|---|---|
 | **0. scaffold** | Vite + React + TS + three.js; tokens.css, app.css shell, toolbar, empty sidebar/stage/panel; deploy workflow | builds and deploys to Pages with the MORPHXGEN shell. **Done** (deploys once merged to `main`) |
 | **1. import + clean** | `io/obj.ts`, `lattice/clean.ts`, `contact/surface.ts` | Vitest on small fixtures (two cells sharing an edge, a subdivided strut, a floating strut). On the reference shoe: 30,683 struts / 18,831 nodes, 1 piece, 53,593 duplicates removed, 2 welds, first contact at 1.98 mm, nothing interpenetrating. **Done** (a basic line view of the model ships with it, ahead of phase 3) |
-| **2. element + solver core** | `element.ts` (Timoshenko frame), `assemble.ts`, `pcg.ts`, `cholesky.ts`, `recover.ts`; no UI | Vitest: cantilever tip δ = PL³/3EI + PL/κGA, axial bar PL/EA, torsion TL/GJ, fixed-fixed beam, a portal frame, all within 0.1 %; a subdivided strut matches the single-element strut; PCG matches Cholesky; reactions balance loads. Benchmark: one warm-started PCG solve of the reference shoe (113k DOF) in the browser, target < 1 s |
+| **2. element + solver core** | `element.ts` (Timoshenko frame), `model.ts`, `order.ts`, `cholesky.ts` | Vitest: cantilever tip δ = PL³/3EI + PL/κGA in two planes and at an arbitrary angle, axial PL/EA, torsion TL/GJ, fixed-fixed beam, an L-frame, all within 0.1 %; a four-element strut matches one element; the factor solves to 1e-9 and rank-1 updates match a fresh factor. **Done.** The CG benchmark was replaced by the direct solver after measurement (§6.5) |
 | **3. stage** | OBJ geometry on the stage, instanced struts, group colours, compressor, section plane, view cube port | the reference shoe renders at 60 fps with all 21k struts |
-| **4. contact + worker** | compressor and ground contact (stick), active set with the §6.4 safeguards, force-target stepping, worker solve; deformed shape and fields | Vitest: a flat plate on a grid of vertical columns gives F = n·EA/L · (δ − g) after closing a known gap; tensile contacts release. Reference shoe, 0.5–2.5 BW sweep: converges without hitting the pass cap, and lands within ~10 % of the prototype (§6.7: 0.97 mm past first contact at 1 BW, 32 struts over 20 % at 2.5 BW), without blocking the UI |
+| **4. contact + worker** | compressor and ground contact (stick), active set with the §6.4 safeguards, force-target stepping, worker solve; deformed shape and fields | Vitest: braced columns under a compressor give F = n·EA/L · (δ − g) with balanced reactions; an unreached node stays free; stepping reaches the target force; one reference-shoe step converges with balanced reactions. In the browser the reference shoe runs to 2.5 BW in ~95 s without blocking the UI and matches the prototype (§6.7). **Done**, with results/charts tabs and the field strip ahead of phase 5 |
 | **5. results + exports** | results / charts / model tabs, contact pressure map, per-region and per-group tables, exports | reaction balance < 0.1 % of applied force; `_deformed.obj` re-imports with the same topology |
 
 Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
@@ -695,6 +736,9 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
   and the upturn past ~100 %
 
 **v3: performance & comparison**
+- faster factorization: a supernodal kernel (dense column panels under
+  the nested-dissection separators) or the factor in WASM; it is ~70 %
+  of a run today
 - solver in WASM or WebGPU if models grow well past ~100k DOF
 - several studies per lattice, saved in IndexedDB; side-by-side
   comparison of force-displacement curves and pressure maps
@@ -738,6 +782,13 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
   long under a smooth surface, this matters little.
 - The Euler check is per strut; global and cell-level buckling need the
   v2 eigen solve.
+- Between solved steps (every ~0.5 BW, at most 0.3 mm of travel apart)
+  the slider interpolates linearly. Contact makes the response
+  piecewise, so values between steps are close but not solved; the
+  results tab says which two steps it is between.
+- A node that comes into stick contact mid-step is held at its original
+  x, z, not where it was when it touched. With sub-millimetre lateral
+  motion this is small, but it isn't true sticking history.
 
 ---
 
