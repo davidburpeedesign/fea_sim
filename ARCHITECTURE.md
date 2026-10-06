@@ -178,7 +178,8 @@ groups the cleaning step needs.
 | setting | value |
 |---|---|
 | strut diameter | 1.5 mm, every group |
-| material | **Carbon EPU 46** (elastomeric polyurethane, Carbon DLS): E 15 MPa, tensile strength 26 MPa, elongation at break 330 %, Shore 78A (§6.2) |
+| material | **Carbon EPU 46** (elastomeric polyurethane, Carbon DLS), from Carbon's EPU 46 TDS: E 15 MPa, tensile strength 26 MPa, elongation at break 330 %, Shore 78A, 1.06 g/mL (§6.2). EPU 46 Soft and Extra Soft are in the library |
+| body mass | **75 kg** (slider range 368–1,839 N) |
 | load | a **force** target set on a slider from **0.5 to 2.5 × body weight**; the compressor travels down until it carries it |
 | linear limit | **20 %** peak fibre strain |
 | start | as modelled, 2 mm clear of the footbed. Stepping starts at first contact, so the gap costs nothing and nothing has to be moved |
@@ -205,8 +206,10 @@ re-solves without re-importing.
 - **`Study`**:
   - `sections: Record<group, { d: number }>` (circular, mm in the UI;
     default 1.5)
-  - `material`: `{ name, E, nu, tensileStrength, elongationAtBreak,
-    shoreA, strainLimit, source }`; `source` is `datasheet` or
+  - `material`: `{ name, E, nu, density, tensileStrength,
+    elongationAtBreak, shoreA, strainLimit, curve?, dma?, source }`.
+    `curve` is the datasheet tensile curve (for the v2 hyperelastic
+    fit), `dma` the digitised E′(T), and `source` is `datasheet` or
     `estimated` (E from Shore hardness, for resins without a modulus)
   - `ground`: `{ y: 'auto' | number, friction: 'stick' | 'slip' }`
   - `indenter`: `{ friction: 'stick' | 'slip' }`
@@ -255,43 +258,84 @@ Joints are rigid: a junction carries moment between all its struts.
 ### 6.2 Material (`materials/library.ts`)
 
 The lattice is printed in **Carbon EPU 46**, an elastomeric polyurethane
-made by Carbon's light-based DLS process. From its technical data sheet:
+made by Carbon's light-based DLS process. The reference is Carbon's EPU
+46 Technical Datasheet (doc #121997-01 Rev A, 27 Sep 2023). Values are
+for EPU 46 Black, L-series printer, centrifugal spin clean, standard
+bake:
 
-| property | ASTM | value |
-|---|---|---|
-| tensile strength | D412 | 26 MPa |
-| modulus of elasticity (Young's) | D412 | 15 MPa |
-| elongation at break | D412 | 330 % |
-| hardness | D2240 | Shore 78A |
-| Bayshore resilience | D2632 | 36 % |
-| tear strength | D642 | 44 kN/m |
-| glass transition | D4065 | −6 °C |
+| property | test | 0.8 mm specimen | 2 mm specimen |
+|---|---|---|---|
+| tensile modulus | ASTM D412 Die C, 500 mm/min | 15 MPa | 14 MPa |
+| stress at 50 / 100 / 200 % | ″ | 4 / 7 / 19 MPa | 4 / 7 / 19 MPa |
+| ultimate tensile strength | ″ | 26 MPa | 23 MPa |
+| elongation at break | ″ | 330 % | 300 % |
+| tear strength | ASTM D624 Die C | 44 kN/m | 34 kN/m |
+| hardness | ASTM D2240 | Shore 80A instant, 78A at 5 s | |
+| Bayshore resilience | ASTM D2632 | 36 % | |
+| compression set | ASTM D395-B, 23 °C, 72 h | 26 % | |
+| Ross flex, 23 °C and −10 °C | ASTM D2632 | > 100,000 cycles | |
+| Tg (DMA tan δ) | ASTM D4065, 1 Hz | −6 °C | |
+| density | ASTM D792 | 1.06 g/mL | |
 
 How the model uses it:
 
-- **E = 15 MPa**, the D412 tensile modulus, as the small-strain modulus
-  of every strut. It's a datasheet value for bulk test pieces. Thin
-  printed struts can come out somewhat softer or stiffer (cure depth,
-  surface skin), which is part of why results are comparative (§13).
+- **E = 15 MPa**, the D412 tensile modulus of the 0.8 mm specimen, as
+  the small-strain modulus of every strut. The 2 mm specimen gives
+  14 MPa, so 1.5 mm struts sit within that 7 % band.
 - **ν = 0.49**: elastomers are nearly incompressible. Beam elements
   don't lock as ν → 0.5; ν only enters through G = E / 2(1+ν).
+- **Density 1.06 g/mL** gives the lattice mass, reported with the
+  results: strut volume × density, ~188 g for the reference shoe with
+  1.5 mm struts. That counts node overlaps twice, so it reads a little
+  high.
 - **No yield.** Elastomers fail by strain, not stress, so the check is
   on **peak fibre strain** rather than stress / yield. Two thresholds:
   - *linear limit* (**20 %**): above it the linear result is no longer
     trustworthy for that strut. Shown as a warning, per strut and as a
     count
-  - *break* (330 %, from the datasheet): a hard flag. The linear limit
-    is reached long before it
-- Tensile strength (26 MPa) is a large-strain value. It is stored and
-  shown but not compared against linear stress: E × strain at 330 % is
-  nowhere near the real stress-strain curve. Resilience, tear strength
-  and Tg are shown for reference only. They matter for energy return,
-  fatigue and cold-weather stiffening, none of which a linear static
-  model captures.
-- **Other resins** go in the same library. If a datasheet gives no
-  modulus, E is estimated from Shore A with Gent's relation (Gent 1958;
-  for EPU 46 it gives 8.3 MPa against the measured 15, a reminder of
-  how rough that is) and marked `estimated`.
+  - *break* (330 %): a hard flag. The linear limit is reached long
+    before it
+- **Why 20 % is about right.** The datasheet's tensile curve softens
+  early. Its secant modulus is ~8 MPa at 50 % strain (4 MPa / 0.5)
+  against 15 MPa at the origin, then it stiffens again past ~100 %.
+  Up to ~20 % the linear model overestimates strut stress by roughly a
+  quarter or less (read off the curve, not measured). Beyond that the
+  real strut is noticeably softer than the model, so the model
+  underpredicts deflection at hot struts.
+- Tensile strength (26 MPa) is stored and shown but not compared with
+  linear stress, which at large strain is nowhere near the real curve.
+  Tear strength, resilience, compression set and Ross flex are shown
+  for reference. They bear on durability, energy return and long-term
+  set, none of which a linear static model captures.
+
+**Library entries** (all from the same datasheet, 0.8 mm specimens):
+
+| material | E | tensile strength | elongation at break | Shore A (5 s) |
+|---|---|---|---|---|
+| EPU 46 (default) | 15 MPa | 26 MPa | 330 % | 78 |
+| EPU 46 Soft | 11 MPa | 21 MPa | 300 % | 71 |
+| EPU 46 Extra Soft | 4.5 MPa | 15 MPa | 250 % | 56 |
+
+Swapping between the three is the cheapest design variable the tool
+offers, since it changes no geometry. A post-processing toggle covers
+the datasheet's IPA-wash variant (EPU 46: 18 MPa, 250 %), since washing
+stiffens parts and shortens elongation. If a future resin's datasheet
+gives no modulus, E is estimated from Shore A with Gent's relation
+(Gent 1958; for EPU 46 it gives 8.3 MPa against the measured 15, a
+reminder of how rough that is) and marked `estimated`.
+
+**Temperature and loading rate.** EPU 46 sits close to its glass
+transition (Tg −6 °C), so stiffness is sensitive to temperature. The
+datasheet's DMA curve (1 Hz storage modulus E′) reads roughly 20 MPa
+at 23 °C, ~45 MPa at 0 °C and well over 100 MPa at −20 °C (read off a
+log-scale chart). Two consequences:
+- *cold*: the same midsole at 0 °C is roughly twice as stiff as at room
+  temperature. v1 adds a temperature input that scales E by the DMA
+  curve, digitised into the material entry
+- *rate*: gait loads at ~1 Hz, which is what DMA measures. E′ at 23 °C
+  (~20 MPa) is ~30 % above the quasi-static D412 modulus. v0 uses the
+  quasi-static 15 MPa; a `dynamic` toggle switching to E′(T) comes with
+  the temperature input
 
 **What E changes.** With prescribed travel, the displacement field
 doesn't depend on E, so contact pattern and strains at a given *travel*
@@ -460,6 +504,7 @@ What this changed:
 |---|---|
 | force-displacement | total compressor force vs. travel δ, one point per step, contact-node count alongside |
 | stiffness | slope of the force-displacement curve once all contacts have engaged (N/mm); the headline number for comparing lattices |
+| mass | strut volume × material density (g); with stiffness, the other headline number when comparing lattices or materials |
 | displacement | per node, magnitude and components (mm); max, and the footbed's vertical deflection map |
 | axial force | N per strut, + tension; the signed field is the clearest map of load paths |
 | bending moment | resultant √(My²+Mz²), max of the two ends |
@@ -500,9 +545,9 @@ with a corner-tick frame, right tabbed panel, and a strip under the stage.
   - *groups*: one row per group with diameter (mm), include toggle and
     count. The group names come from the file; the unnamed group shows
     as `(no group)`
-  - *material*: EPU 46 by default, with its datasheet values (E,
-    tensile strength, elongation at break, Shore A) editable; ν; linear
-    strain limit (20 %)
+  - *material*: EPU 46 / Soft / Extra Soft, IPA-wash toggle, datasheet
+    values (E, tensile strength, elongation at break, Shore A, density)
+    editable; ν; linear strain limit (20 %)
   - *load*: the force slider (0.5–2.5 × BW, force in N beside it), body
     mass, steps, stick / slip for compressor and ground
   - *display*: layers (undeformed, deformed, compressor, ground,
@@ -616,9 +661,10 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
 **v1: closer to the physical test**
 - node stiffening: a rigid zone at each strut end sized from the joint;
   printed nodes make stubby lattices stiffer than bare struts
-- measured material: fit E (and later a hyperelastic model) to a
-  compression test of a printed EPU 46 lattice coupon, replacing the
-  bulk datasheet modulus
+- temperature input and `dynamic` toggle: E from the digitised DMA
+  curve (§6.2)
+- measured material: fit E to a compression test of a printed EPU 46
+  lattice coupon, replacing the datasheet modulus
 - per-strut diameters from the file. OBJ can't carry them, so this means
   reading Houdini's JSON `.geo` export (point attributes like `pscale`
   and named groups come through directly), or a CSV sidecar
@@ -632,7 +678,10 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
   and anything softer or thinner need it
 - linear buckling: lowest eigenvalues of (K + λ K_G), mode shapes on the
   stage
-- hyperelastic struts (Neo-Hookean / Mooney-Rivlin fitted to the resin)
+- hyperelastic struts: Mooney-Rivlin or Yeoh fitted to the datasheet
+  tensile curve (stress at 50 / 100 / 200 % and break are given). A Yeoh
+  fit is the likely choice, since it captures both the early softening
+  and the upturn past ~100 %
 
 **v3: performance & comparison**
 - solver in WASM or WebGPU if models grow well past ~100k DOF
@@ -655,10 +704,15 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
   Struts over the 20 % limit are counted and marked, and the summary
   says when any exist. A softer material, thinner struts or a
   heavier load moves more struts past the limit; those cases need v2.
-- **E is a bulk datasheet value** (EPU 46 D412). Printed struts 1.5 mm
-  across may differ from bulk test bars. Stiffness is directly
-  proportional to E, so a measured value from a printed lattice coupon
-  is the best calibration.
+- **E is a quasi-static room-temperature datasheet value** (EPU 46
+  D412, 0.8 mm specimen). Real stiffness rises ~30 % at gait rates and
+  roughly doubles at 0 °C (DMA, §6.2), and printed 1.5 mm struts may
+  differ from test specimens. Stiffness is proportional to E, so a
+  printed lattice coupon tested at the use temperature is the best
+  calibration.
+- **No time dependence.** Compression set (26 % after 72 h at 25 %
+  compression, 23 °C) and hysteresis (36 % resilience) are outside a
+  static model.
 - Junctions are points. Real printed nodes add material and stiffness
   and concentrate stress, so stiffness of stubby struts (L/d < ~5, which
   is most of this lattice) is underpredicted, and peak stresses at nodes
@@ -680,14 +734,13 @@ Phases 1 and 2 have no UI dependency and can run alongside 0 and 3.
 
 Decided (§4.1):
 - 1.5 mm struts in every group
-- Carbon EPU 46 from its technical data sheet (E 15 MPa, 26 MPa, 330 %,
-  Shore 78A)
-- force-controlled load on a 0.5–2.5 × body weight slider
+- Carbon EPU 46 from Carbon's technical datasheet (doc #121997-01 Rev A)
+- force-controlled load on a 0.5–2.5 × body weight slider, 75 kg body
+  mass
 - 20 % peak fibre strain as the linear limit
 - the 2 mm start gap stays; the whole lattice; stick on both surfaces
 
 Still open (defaults are in place):
 
-1. **Body mass** for the slider. The default is 75 kg.
-2. **Printed modulus.** A compression test of a printed EPU 46 lattice
+1. **Printed modulus.** A compression test of a printed EPU 46 lattice
    coupon would show how far the 1.5 mm struts are from the bulk 15 MPa.
